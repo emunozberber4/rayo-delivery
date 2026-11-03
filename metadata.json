@@ -1,0 +1,13 @@
+{
+  "name": "Copia Rayo Delivery 1",
+  "description": "App de delivery multi-comercio ultra rápida. Pide comida, súper, farmacia y más en minutos.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API",
+    "Real-time tracking",
+    "Cart management",
+    "User profiles"
+  ]
+}

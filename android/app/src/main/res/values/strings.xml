@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Rayo Delivery</string>
+    <string name="title_activity_main">Rayo Delivery</string>
+    <string name="package_name">com.rayodelivery.app</string>
+    <string name="custom_url_scheme">com.rayodelivery.app</string>
+</resources>

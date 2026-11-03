@@ -1,0 +1,130 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "Information about the registered user.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" },
+        "whatsapp": { "type": "string" },
+        "role": { "type": "string", "enum": ["client", "restaurant", "rider", "admin"] },
+        "lat": { "type": "number" },
+        "lng": { "type": "number" },
+        "autoAccept": { "type": "boolean" },
+        "favorites": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "label": { "type": "string" },
+              "address": { "type": "string" }
+            }
+          }
+        },
+        "facePhotoUrl": { "type": "string" },
+        "faceVerified": { "type": "boolean" },
+        "faceVerifiedAt": { "type": "string" }
+      },
+      "required": ["name", "email", "address"]
+    },
+    "Restaurant": {
+      "title": "Restaurant",
+      "description": "Details about a restaurant or store.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "image": { "type": "string" },
+        "rating": { "type": "number" },
+        "deliveryTime": { "type": "string" },
+        "deliveryFee": { "type": "number" },
+        "categories": { "type": "array", "items": { "type": "string" } },
+        "whatsapp": { "type": "string" },
+        "isOpen": { "type": "boolean" },
+        "openingDays": { "type": "array", "items": { "type": "string" } },
+        "securityPin": { "type": "string" },
+        "ownerEmail": { "type": "string" },
+        "isHidden": { "type": "boolean" }
+      },
+      "required": ["name", "image", "rating"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Individual item in a restaurant's menu.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "image": { "type": "string" },
+        "category": { "type": "string" },
+        "isOutOfStock": { "type": "boolean" }
+      },
+      "required": ["name", "price", "image"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "A customer order.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userWhatsapp": { "type": "string" },
+        "restaurantId": { "type": "string" },
+        "restaurantName": { "type": "string" },
+        "restaurantWhatsapp": { "type": "string" },
+        "deliveryAddress": { "type": "string" },
+        "deliveryLat": { "type": "number" },
+        "deliveryLng": { "type": "number" },
+        "items": { "type": "array" },
+        "total": { "type": "number" },
+        "status": { "type": "string", "enum": ["recibido", "preparacion", "camino", "entregado"] },
+        "riderId": { "type": "string" },
+        "riderName": { "type": "string" },
+        "riderEmail": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "restaurantId", "items", "total", "status", "deliveryAddress"]
+    },
+    "Message": {
+      "title": "Chat Message",
+      "description": "Message between customer and delivery.",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "text": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "text", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Private user profiles."
+    },
+    "/restaurants/{restaurantId}": {
+      "schema": "Restaurant",
+      "description": "Public list of restaurants."
+    },
+    "/restaurants/{restaurantId}/menu/{productId}": {
+      "schema": "Product",
+      "description": "Menu items for a restaurant."
+    },
+    "/orders/{orderId}": {
+      "schema": "Order",
+      "description": "Customer orders."
+    },
+    "/orders/{orderId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Real-time chat for orders."
+    },
+    "/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Public global chat for testing and updates."
+    }
+  }
+}

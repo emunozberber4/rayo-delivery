@@ -1,0 +1,223 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.0 Test Connection (Baseline guideline)
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn();
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function hasUserDoc() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isRider() {
+      return isVerified() && hasUserDoc() && getUserData().role == 'rider';
+    }
+
+    function isRestaurantAdmin() {
+      return isVerified() && hasUserDoc() && getUserData().role == 'admin';
+    }
+
+    // B-02: Autorización exclusiva basada en Firebase Authentication Custom Claims.
+    // Desacoplado totalmente de direcciones de correo electrónico en texto plano.
+    function isSuperAdmin() {
+      return isVerified() && request.auth.token.get('super_admin', false) == true;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['name', 'email', 'address']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 100 &&
+             data.address is string && data.address.size() <= 500 &&
+             (data.phone == null || (data.phone is string && data.phone.size() <= 20)) &&
+             (data.whatsapp == null || (data.whatsapp is string && data.whatsapp.size() <= 20)) &&
+             (data.role == null || data.role in ['client', 'restaurant', 'rider', 'admin', 'super_admin']) &&
+             (data.lat == null || data.lat is number) &&
+             (data.lng == null || data.lng is number) &&
+             (data.isLoggedIn == null || data.isLoggedIn is bool);
+    }
+
+    function isValidRestaurant(data) {
+      return data.keys().hasAll(['name', 'image', 'rating']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.image is string && data.image.size() > 0 &&
+             data.rating is number && data.rating >= 0 && data.rating <= 5;
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll(['userId', 'restaurantId', 'items', 'total', 'status', 'timestamp', 'deliveryAddress']) &&
+             data.status in ['recibido', 'preparacion', 'camino', 'entregado', 'cancelado'] &&
+             data.total is number && data.total >= 0 &&
+             data.items is list && data.items.size() > 0 &&
+             (data.timestamp == request.time || data.timestamp is timestamp);
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasOnly(['senderId', 'text', 'timestamp', 'senderName']) &&
+             data.senderId == request.auth.uid &&
+             data.text is string && data.text.size() > 0 && data.text.size() <= 1000 &&
+             (data.timestamp == request.time || data.timestamp is timestamp);
+    }
+
+    // --- Rules ---
+
+    match /messages/{messageId} {
+      allow read: if isSignedIn();
+      allow create: if isVerified() && isValidMessage(incoming());
+    }
+
+    match /users/{userId} {
+      allow get: if (isOwner(userId) || isSuperAdmin()) && isValidId(userId);
+      allow list: if isSuperAdmin();
+      allow create: if isVerified() && userId == request.auth.uid && isValidId(userId) &&
+        incoming().role == 'client' &&
+        incoming().get('isSuperAdmin', false) == false &&
+        incoming().get('isVerifiedRider', false) == false &&
+        incoming().get('balance', 0) == 0;
+      allow update: if (isSuperAdmin() || isOwner(userId)) && isValidId(userId) && (
+        isSuperAdmin() || (
+          // Acción: Actualización de perfil por el propio usuario (Bloqueados roles, saldos y privilegios)
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'address', 'phone', 'whatsapp', 'lat', 'lng', 'theme', 
+            'favorites', 'favoriteRestaurants', 'isLoggedIn', 'autoAccept', 
+            'vehicleInfo', 'photoURL', 'lastLocationUpdate', 'updatedAt'
+          ])
+        )
+      );
+      allow delete: if false; // Preservar histórico e integridad fiduciaria
+    }
+
+    match /restaurants/{restaurantId} {
+      allow read: if true;
+      allow create: if (isSuperAdmin() || (isVerified() && incoming().ownerId == request.auth.uid && incoming().get('isApproved', false) == false)) && isValidId(restaurantId);
+      allow update: if isValidId(restaurantId) && (
+        isSuperAdmin() || (
+          isVerified() && existing().ownerId == request.auth.uid &&
+          // El propietario solo puede actualizar campos operativos, no autoaprobarse ni cambiar de dueño
+          !incoming().diff(existing()).affectedKeys().hasAny(['ownerId', 'isApproved', 'isAdminCreated', 'rating', 'totalReviews'])
+        )
+      );
+      allow delete: if isSuperAdmin() && isValidId(restaurantId);
+
+      match /menu/{productId} {
+        allow read: if true;
+        allow write: if isValidId(productId) && (
+          isSuperAdmin() || 
+          (isVerified() && get(/databases/$(database)/documents/restaurants/$(restaurantId)).data.ownerId == request.auth.uid)
+        );
+      }
+    }
+
+    match /orders/{orderId} {
+      function canReadOrder(orderData) {
+        return isSuperAdmin() || 
+               orderData.userId == request.auth.uid || 
+               (isRider() && (orderData.riderId == request.auth.uid || orderData.riderId == 'SYSTEM' || orderData.riderId == null)) ||
+               (isRestaurantAdmin() && orderData.restaurantId == getUserData().restaurantId);
+      }
+
+      allow get: if canReadOrder(resource.data) && isValidId(orderId);
+      allow list: if isVerified() && (
+        isSuperAdmin() || 
+        resource.data.userId == request.auth.uid || 
+        isRider() ||
+        (isRestaurantAdmin() && resource.data.restaurantId == getUserData().restaurantId)
+      );
+      
+      // FASE 5: Revocación de creación directa desde cliente por seguridad fiduciaria.
+      // La inserción de pedidos solo puede ser realizada por el backend autorizado mediante Firebase Admin SDK.
+      allow create: if false;
+      
+      allow update: if isValidId(orderId) && isVerified() && (
+        // Acción 1: Repartidor verificado toma pedido disponible ('SYSTEM')
+        (isRider() && (existing().get('riderId', null) == null || existing().get('riderId', null) == 'SYSTEM') &&
+         incoming().riderId == request.auth.uid &&
+         (existing().status == 'recibido' || existing().status == 'preparacion') &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'riderId', 'riderName', 'riderPhone', 'riderEmail', 'assignedAt'])) ||
+        
+        // Acción 2: Comercio pasa a preparación (SIN alterar riderId)
+        (isRestaurantAdmin() && existing().restaurantId == getUserData().restaurantId &&
+         existing().status == 'recibido' && incoming().status == 'preparacion' &&
+         incoming().get('riderId', null) == existing().get('riderId', null) &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'assignedAt', 'prepTimeEstimated'])) ||
+
+        // Acción 3: Repartidor asignado avanza a camino tras recolección
+        (isRider() && existing().riderId == request.auth.uid &&
+         (existing().status == 'preparacion' || existing().status == 'recibido') && incoming().status == 'camino' &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'pickedUpAt'])) ||
+
+        // Acción 4: Repartidor asignado marca entrega completada
+        (isRider() && existing().riderId == request.auth.uid &&
+         existing().status == 'camino' && incoming().status == 'entregado' &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'deliveredAt', 'totalTimeMinutes'])) ||
+        
+        // Acción 5: Repartidor asignado solicita liberación
+        (isRider() && existing().riderId == request.auth.uid &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['releaseRequested', 'releaseRequestedAt', 'releaseRequestedBy'])) ||
+        
+        // Acción 6: Autorización de liberación (Comercio o Superadmin)
+        (incoming().diff(existing()).affectedKeys().hasOnly(['riderId', 'riderName', 'riderPhone', 'status', 'releasedAt', 'lastRiderId', 'releaseRequested', 'releaseRequestedBy', 'releaseRequestedAt', 'releaseAuthorizedBy']) && (
+          (isRestaurantAdmin() && existing().restaurantId == getUserData().restaurantId) || isSuperAdmin()
+        )) ||
+        
+        // Acción 7: Cliente cancela pedido no iniciado
+        (existing().userId == request.auth.uid && existing().status == 'recibido' && incoming().status == 'cancelado' &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'cancelledAt', 'cancelReason'])) ||
+
+        // Acción 8: Cliente califica pedido entregado
+        (existing().userId == request.auth.uid && existing().status == 'entregado' &&
+         !('review' in existing()) &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['review'])) ||
+
+        // Acción 9: Gestión administrativa supervisada (Protección fiduciaria: prohibido alterar totales, items y cliente)
+        (isSuperAdmin() &&
+         !incoming().diff(existing()).affectedKeys().hasAny(['userId', 'items', 'subtotal', 'deliveryFee', 'total', 'paymentMethod', 'shortId', 'longId', 'idempotencyKey', 'timestamp']) &&
+         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'riderId', 'riderName', 'riderPhone', 'cancelReason', 'adminAuditReason', 'adminUpdatedBy', 'adminUpdatedAt']))
+      );
+      
+      allow delete: if false; // Preservación histórica fiduciaria: prohibido el borrado de pedidos
+
+      match /messages/{messageId} {
+        allow read: if canReadOrder(get(/databases/$(database)/documents/orders/$(orderId)).data);
+        allow create: if isVerified() && canReadOrder(get(/databases/$(database)/documents/orders/$(orderId)).data) && isValidMessage(incoming());
+      }
+    }
+  }
+}

@@ -1,0 +1,323 @@
+// =====================================================================
+// BORRADOR DE REGLAS DE PRUEBA - ESTADO: NO APROBADO / EN EVALUACIÓN
+// ESTE ARCHIVO ES EXCLUSIVAMENTE PARA EL ENTORNO DE PRUEBAS LOCAL AISLADO
+// NO DESPLEGAR NI REEMPLAZAR firestore.rules DE PRODUCCIÓN
+// Proyecto ficticio de pruebas: rayo-delivery-testing-sandbox
+// =====================================================================
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 0. Denegación global por defecto
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 0.1 Diagnóstico de conexión en pruebas
+    match /test/connection {
+      allow get: if true;
+    }
+
+    // --- Funciones Auxiliares de Identidad y Roles ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function hasUserDoc() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // Super Admin:
+    // NOTA DE SEGURIDAD ARQUITECTÓNICA:
+    // Para producción, la solución definitiva DEBE ser una Custom Claim criptográfica (request.auth.token.super_admin == true)
+    // emitida por un proceso de servidor seguro con Firebase Admin SDK.
+    // La lista de correos incluida a continuación es estrictamente provisional para pruebas locales,
+    // exige verificación del proveedor de identidad (email_verified == true) y no debe usarse como mecanismo definitivo en producción.
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        request.auth.token.super_admin == true ||
+        (
+          request.auth.token.email in ['emunozberber@gmail.com', 'emunozberber4@gmail.com'] &&
+          (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == 'google.com')
+        )
+      );
+    }
+
+    // Administrador de Restaurante: rol 'admin' validado y vinculado al restaurante (soporta multi-sucursal)
+    function isRestaurantAdmin(restaurantId) {
+      return isSignedIn() && hasUserDoc() && (
+        isSuperAdmin() ||
+        (
+          getUserData().role == 'admin' && (
+            getUserData().restaurantId == restaurantId ||
+            (getUserData().ownedRestaurantIds != null && restaurantId in getUserData().ownedRestaurantIds)
+          )
+        )
+      );
+    }
+
+    // Repartidor Aprobado: rol 'rider' Y verificación explícita 'isVerifiedRider == true'
+    function isApprovedRider() {
+      return isSignedIn() && hasUserDoc() &&
+             getUserData().role == 'rider' &&
+             getUserData().isVerifiedRider == true;
+    }
+
+    // --- Colección: USUARIOS (/users/{userId}) ---
+    match /users/{userId} {
+      allow get: if (isOwner(userId) || isSuperAdmin()) && isValidId(userId);
+      allow list: if isSuperAdmin();
+
+      // Creación: Sólo puede crearse a sí mismo con rol 'client' y sin privilegios
+      allow create: if isOwner(userId) && isValidId(userId) &&
+        request.resource.data.name is string && request.resource.data.name.size() > 0 &&
+        request.resource.data.email == request.auth.token.email &&
+        (!('role' in request.resource.data) || request.resource.data.role == 'client') &&
+        (!('isSuperAdmin' in request.resource.data) || request.resource.data.isSuperAdmin == false) &&
+        (!('isVerifiedRider' in request.resource.data) || request.resource.data.isVerifiedRider == false) &&
+        (!('faceVerified' in request.resource.data) || request.resource.data.faceVerified == false) &&
+        (!('balance' in request.resource.data) || request.resource.data.balance == 0);
+
+      // Actualización:
+      // - Super Admin puede actualizar cualquier campo
+      // - Usuario común NO puede modificar campos sensibles de rol, verificación, saldo, biometría o restaurantes
+      allow update: if isValidId(userId) && (
+        isSuperAdmin() ||
+        (
+          isOwner(userId) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'role', 'isSuperAdmin', 'isVerifiedRider', 'balance', 'restaurantId', 
+            'ownedRestaurantIds', 'completedOrdersCount', 'acceptanceRate', 'performanceRate', 'xp', 'level',
+            'faceVerified', 'faceVerifiedAt', 'faceBiometricId'
+          ]) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'name', 'address', 'phone', 'whatsapp', 'lat', 'lng', 'theme',
+            'favorites', 'favoriteRestaurants', 'isLoggedIn', 'vehicleInfo',
+            'riderStatus', 'lastLocationUpdate', 'facePhotoUrl'
+          ])
+        )
+      );
+
+      allow delete: if isSuperAdmin() && isValidId(userId);
+    }
+
+    // --- Colección: RESTAURANTES (/restaurants/{restaurantId}) ---
+    match /restaurants/{restaurantId} {
+      allow read: if true;
+      allow create: if isSuperAdmin() && isValidId(restaurantId);
+      allow update: if isRestaurantAdmin(restaurantId) && isValidId(restaurantId);
+      allow delete: if isSuperAdmin() && isValidId(restaurantId);
+
+      // Subcolección: MENÚ (/restaurants/{restaurantId}/menu/{productId})
+      match /menu/{productId} {
+        allow read: if true;
+        allow write: if isRestaurantAdmin(restaurantId) && isValidId(productId);
+      }
+    }
+
+    // --- Colección: PEDIDOS (/orders/{orderId}) ---
+    match /orders/{orderId} {
+
+      function isOrderCustomer(orderData) {
+        return isSignedIn() && orderData.userId == request.auth.uid;
+      }
+
+      function isAssignedRider(orderData) {
+        return isApprovedRider() && orderData.riderId == request.auth.uid;
+      }
+
+      function isOrderRestaurant(orderData) {
+        return isRestaurantAdmin(orderData.restaurantId);
+      }
+
+      function isAvailableForRiders(orderData) {
+        return isApprovedRider() &&
+               (orderData.riderId == 'SYSTEM' || orderData.riderId == null) &&
+               orderData.status in ['recibido', 'preparacion'];
+      }
+
+      // Lectura individual:
+      allow get: if isValidId(orderId) && (
+        isSuperAdmin() ||
+        isOrderCustomer(resource.data) ||
+        isOrderRestaurant(resource.data) ||
+        isAssignedRider(resource.data) ||
+        isAvailableForRiders(resource.data)
+      );
+
+      // Listado / Query:
+      // Repartidor solo lista sus pedidos asignados o pedidos libres ACTIVOS ('recibido' o 'preparacion').
+      // Comercio lista sus pedidos EXIGIENDO rol 'admin' legítimo y titularidad de la sucursal.
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        resource.data.userId == request.auth.uid ||
+        (
+          isApprovedRider() && (
+            resource.data.riderId == request.auth.uid ||
+            (resource.data.riderId == 'SYSTEM' && resource.data.status in ['recibido', 'preparacion'])
+          )
+        ) ||
+        (
+          hasUserDoc() && getUserData().role == 'admin' && (
+            resource.data.restaurantId == getUserData().restaurantId ||
+            (getUserData().ownedRestaurantIds != null && resource.data.restaurantId in getUserData().ownedRestaurantIds)
+          )
+        )
+      );
+
+      // Creación:
+      // Exige perfil con rol 'client' (o superadmin), estado inicial 'recibido', riderId 'SYSTEM',
+      // apuntando a un restaurante existente y SIN campos fantasma.
+      allow create: if isSignedIn() && isValidId(orderId) &&
+        hasUserDoc() && (getUserData().role == 'client' || isSuperAdmin()) &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'recibido' &&
+        (request.resource.data.riderId == 'SYSTEM' || !('riderId' in request.resource.data)) &&
+        request.resource.data.total is number && request.resource.data.total >= 0 &&
+        request.resource.data.items is list && request.resource.data.items.size() > 0 &&
+        request.resource.data.restaurantId is string &&
+        exists(/databases/$(database)/documents/restaurants/$(request.resource.data.restaurantId)) &&
+        !request.resource.data.keys().hasAny([
+          'deliveredAt', 'assignedAt', 'totalTimeMinutes', 'review',
+          'releasedAt', 'lastRiderId', 'releaseRequested', 'releaseRequestedBy',
+          'releaseRequestedAt', 'releaseAuthorizedBy'
+        ]);
+
+      // Actualización:
+      allow update: if isValidId(orderId) && (
+        // Super Admin: administración operativa, pero preservando campos estructurales de identidad, precios, pagos y reseñas
+        (
+          isSuperAdmin() &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+            'userId', 'restaurantId', 'shortId', 'longId',
+            'total', 'subtotal', 'items', 'paymentMethod',
+            'discount', 'couponCode', 'deliveryFee', 'review'
+          ]) &&
+          (!('status' in request.resource.data) || request.resource.data.status in ['recibido', 'preparacion', 'camino', 'entregado', 'cancelado'])
+        ) ||
+
+        // Transición 1: Repartidor Aprobado toma pedido libre
+        (
+          isApprovedRider() &&
+          (resource.data.riderId == 'SYSTEM' || resource.data.riderId == null) &&
+          resource.data.status in ['recibido', 'preparacion'] &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['riderId', 'riderName', 'riderPhone', 'status', 'assignedAt']) &&
+          request.resource.data.riderId == request.auth.uid &&
+          request.resource.data.status == 'preparacion'
+        ) ||
+
+        // Transición 2: Comercio avanza a 'preparacion' o cancela (SOLO si estaba 'recibido' o 'preparacion')
+        (
+          isOrderRestaurant(resource.data) &&
+          resource.data.status in ['recibido', 'preparacion'] &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']) &&
+          request.resource.data.status in ['preparacion', 'cancelado']
+        ) ||
+
+        // Transición 3: Repartidor asignado avanza paso a paso (preparacion -> camino)
+        (
+          isAssignedRider(resource.data) &&
+          resource.data.status == 'preparacion' &&
+          request.resource.data.status == 'camino' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+        ) ||
+
+        // Transición 4: Repartidor asignado completa entrega (camino -> entregado)
+        (
+          isAssignedRider(resource.data) &&
+          resource.data.status == 'camino' &&
+          request.resource.data.status == 'entregado' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'deliveredAt', 'totalTimeMinutes']) &&
+          request.resource.data.deliveredAt is timestamp &&
+          request.resource.data.totalTimeMinutes is number && request.resource.data.totalTimeMinutes >= 0
+        ) ||
+
+        // Transición 5: Repartidor asignado solicita liberación/desasignación
+        (
+          isAssignedRider(resource.data) &&
+          resource.data.status in ['preparacion', 'camino'] &&
+          (!('releaseRequested' in resource.data) || resource.data.releaseRequested == false) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['releaseRequested', 'releaseRequestedAt', 'releaseRequestedBy']) &&
+          request.resource.data.releaseRequested == true &&
+          request.resource.data.releaseRequestedBy == request.auth.uid &&
+          request.resource.data.releaseRequestedBy == resource.data.riderId
+        ) ||
+
+        // Transición 6: Comercio autoriza liberación/reasignación
+        // Exige solicitud previa legítima del repartidor actualmente asignado,
+        // restablece riderId a 'SYSTEM', guarda lastRiderId y limita status a 'recibido' o 'preparacion'
+        (
+          isOrderRestaurant(resource.data) &&
+          resource.data.status in ['preparacion', 'camino'] &&
+          resource.data.releaseRequested == true &&
+          resource.data.releaseRequestedBy == resource.data.riderId &&
+          resource.data.riderId != 'SYSTEM' && resource.data.riderId != null &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'riderId', 'riderName', 'riderPhone', 'status', 'releasedAt', 'lastRiderId',
+            'releaseRequested', 'releaseRequestedBy', 'releaseRequestedAt', 'releaseAuthorizedBy'
+          ]) &&
+          request.resource.data.riderId == 'SYSTEM' &&
+          request.resource.data.lastRiderId == resource.data.riderId &&
+          request.resource.data.releaseRequested == false &&
+          request.resource.data.releaseAuthorizedBy == request.auth.uid &&
+          request.resource.data.status in ['recibido', 'preparacion']
+        ) ||
+
+        // Transición 7: Cliente califica el pedido ÚNICAMENTE una vez entregado y de forma única
+        (
+          isOrderCustomer(resource.data) &&
+          resource.data.status == 'entregado' &&
+          !('review' in resource.data) &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['review']) &&
+          request.resource.data.review.keys().hasOnly(['rating', 'comment', 'timestamp']) &&
+          request.resource.data.review.rating is number &&
+          request.resource.data.review.rating >= 1 && request.resource.data.review.rating <= 5 &&
+          (!('comment' in request.resource.data.review) || (request.resource.data.review.comment is string && request.resource.data.review.comment.size() <= 500)) &&
+          ('timestamp' in request.resource.data.review) &&
+          (request.resource.data.review.timestamp is timestamp)
+        )
+      );
+
+      allow delete: if isSuperAdmin() && isValidId(orderId);
+
+      // Subcolección: CHAT DEL PEDIDO (/orders/{orderId}/messages/{messageId})
+      match /messages/{messageId} {
+        function canParticipateInChat() {
+          return exists(/databases/$(database)/documents/orders/$(orderId)) && (
+            isSuperAdmin() ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.userId == request.auth.uid ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.riderId == request.auth.uid ||
+            isRestaurantAdmin(get(/databases/$(database)/documents/orders/$(orderId)).data.restaurantId)
+          );
+        }
+
+        allow read: if canParticipateInChat();
+        allow create: if canParticipateInChat() &&
+                      isValidId(messageId) &&
+                      request.resource.data.keys().hasOnly(['text', 'senderId', 'senderName', 'timestamp']) &&
+                      request.resource.data.senderId == request.auth.uid &&
+                      request.resource.data.text is string &&
+                      request.resource.data.text.size() > 0 &&
+                      request.resource.data.text.size() <= 1000 &&
+                      (!('senderName' in request.resource.data) || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 100)) &&
+                      ('timestamp' in request.resource.data) &&
+                      (request.resource.data.timestamp is timestamp);
+        allow update, delete: if false; // Inmutabilidad del registro de chat del pedido
+      }
+    }
+  }
+}
