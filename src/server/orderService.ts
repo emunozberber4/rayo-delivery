@@ -92,7 +92,34 @@ export async function verifyAuthToken(authHeader: string | undefined): Promise<{
   const token = authHeader.split('Bearer ')[1]?.trim();
   if (!token) return null;
 
-  // 1. Try Firebase Admin SDK verification
+  // En entornos de pruebas/staging sin emulador de Auth, validar localmente sin conexiones remotas a Google
+  if ((process.env.NODE_ENV === 'test' || process.env.RAYO_TEST_ENV === 'true') && !process.env.FIREBASE_AUTH_EMULATOR_HOST) {
+    if (token.startsWith('mock_test_token_')) {
+      const uid = token.replace('mock_test_token_', '');
+      const isSuper = uid.includes('superadmin') || uid.includes('super_admin');
+      return { 
+        uid, 
+        email: `${uid}@rayo-test.local`,
+        superAdmin: isSuper
+      };
+    }
+    const parts = token.split('.');
+    if (parts.length === 3) {
+      try {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+        if (payload.user_id || payload.sub || payload.uid) {
+          return {
+            uid: payload.user_id || payload.sub || payload.uid,
+            email: payload.email,
+            superAdmin: Boolean(payload.super_admin || payload.superAdmin)
+          };
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  // 1. Try Firebase Admin SDK verification (en emulador activo o producción Cloud Run)
   try {
     const decoded = await adminAuth.verifyIdToken(token);
     return { 
@@ -156,6 +183,43 @@ export async function getAuthoritativeRestaurant(restaurantId: string): Promise<
   payAtLocal?: boolean;
   menu: Array<{ id: string; name: string; price: number; isOutOfStock?: boolean }>;
 } | null> {
+  // A. Si NODE_ENV === 'production' y no existe FIRESTORE_EMULATOR_HOST:
+  // Rechazar inmediatamente con HTTP 503 sin ejecutar consultas ni conexiones remotas.
+  if (process.env.NODE_ENV === 'production' && !process.env.FIRESTORE_EMULATOR_HOST) {
+    throw {
+      status: 503,
+      message: 'Servicio no disponible: Catálogo fiduciario no accesible.'
+    };
+  }
+
+  // B. Si (NODE_ENV === 'test' || RAYO_TEST_ENV === 'true') y no existe FIRESTORE_EMULATOR_HOST:
+  // Resolver el restaurante exclusivamente desde MOCK_RESTAURANTS manteniendo la misma estructura.
+  // No acceder a adminDb ni realizar conexiones de red.
+  if ((process.env.NODE_ENV === 'test' || process.env.RAYO_TEST_ENV === 'true') && !process.env.FIRESTORE_EMULATOR_HOST) {
+    const localRest = MOCK_RESTAURANTS.find(r => r.id === restaurantId);
+    if (localRest) {
+      return {
+        id: localRest.id,
+        name: localRest.name,
+        isOpen: localRest.isOpen !== false,
+        isApproved: localRest.isApproved !== false,
+        address: localRest.address,
+        phone: localRest.phone,
+        whatsapp: localRest.whatsapp || localRest.phone,
+        location: localRest.location,
+        payAtLocal: Boolean(localRest.payAtLocal),
+        menu: localRest.menu.map(p => ({
+          id: p.id,
+          name: p.name,
+          price: p.price,
+          isOutOfStock: Boolean(p.isOutOfStock)
+        }))
+      };
+    }
+    return null;
+  }
+
+  // C. Si existe FIRESTORE_EMULATOR_HOST (o en producción con credenciales fiduciarias activas):
   let firestoreError: any = null;
 
   // 1. Try Firestore if available
