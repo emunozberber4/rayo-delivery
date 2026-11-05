@@ -17,8 +17,6 @@ env:
   RAYO_TEST_ENV: 'true'
   FIREBASE_PROJECT_ID: demo-rayo-test
   GCLOUD_PROJECT: demo-rayo-test
-  FIRESTORE_EMULATOR_HOST: 127.0.0.1:8080
-  FIREBASE_AUTH_EMULATOR_HOST: 127.0.0.1:9099
   CI: 'true'
 
 jobs:
@@ -75,6 +73,9 @@ jobs:
           npm run test:staging
 
       - name: Execute Real Firebase Emulator Suite (Firestore & Auth)
+        env:
+          FIRESTORE_EMULATOR_HOST: 127.0.0.1:8080
+          FIREBASE_AUTH_EMULATOR_HOST: 127.0.0.1:9099
         run: |
           echo "=== Starting Firebase Emulator Suite with demo-rayo-test ==="
           firebase emulators:exec \
