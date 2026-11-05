@@ -14,17 +14,9 @@ import * as path from 'path';
 export function verifyCiIsolation(): { success: boolean; checks: Array<{ name: string; passed: boolean; details: string }> } {
   const checks: Array<{ name: string; passed: boolean; details: string }> = [];
 
-  // 1. Proyecto obligatorio 'demo-rayo-test'
   const expectedProject = 'demo-rayo-test';
-  const configuredProject = process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || '';
-  const projectPassed = configuredProject === expectedProject;
-  checks.push({
-    name: 'PROJECT_ID == demo-rayo-test',
-    passed: projectPassed,
-    details: `Configurado: "${configuredProject}". Requerido: "${expectedProject}" (debe comenzar con prefijo "demo-")`
-  });
 
-  // 2. Comprobar .firebaserc
+  // 1. Comprobar .firebaserc
   let firebasercProject = '';
   try {
     const rcPath = path.resolve(process.cwd(), '.firebaserc');
@@ -40,6 +32,15 @@ export function verifyCiIsolation(): { success: boolean; checks: Array<{ name: s
     name: '.firebaserc project default == demo-rayo-test',
     passed: rcPassed,
     details: `Encontrado en .firebaserc: "${firebasercProject}"`
+  });
+
+  // 2. Proyecto obligatorio 'demo-rayo-test'
+  const configuredProject = process.env.FIREBASE_PROJECT_ID || process.env.GCLOUD_PROJECT || firebasercProject;
+  const projectPassed = configuredProject === expectedProject;
+  checks.push({
+    name: 'PROJECT_ID == demo-rayo-test',
+    passed: projectPassed,
+    details: `Configurado: "${configuredProject}". Requerido: "${expectedProject}" (debe comenzar con prefijo "demo-")`
   });
 
   // 3. Ausencia total de credenciales de producción
