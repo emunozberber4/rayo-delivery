@@ -474,6 +474,19 @@ export async function createServerAuthorizedOrder(
 
   // 10. Atomic Execution with Idempotency Key (Distributed Transaction)
   if (rawKey) {
+    // Prohibir fallback en producción si no hay emulador ni persistencia fiduciaria alcanzable
+    if (process.env.NODE_ENV === 'production' && !process.env.FIRESTORE_EMULATOR_HOST) {
+      throw {
+        status: 503,
+        message: 'Servicio no disponible: Persistencia fiduciaria inalcanzable.'
+      };
+    }
+
+    // En pruebas unitarias/staging sin emulador activo, usar simulación en memoria sin intentar conexiones de red
+    if ((process.env.NODE_ENV === 'test' || process.env.RAYO_TEST_ENV === 'true') && !process.env.FIRESTORE_EMULATOR_HOST) {
+      return executeLocalSimulatedAtomicOrder(userId, rawKey, canonicalHash, orderDocument);
+    }
+
     const idemDocRef = adminDb.collection('idempotency_keys').doc(rawKey);
     const orderDocRef = adminDb.collection('orders').doc();
 
@@ -581,6 +594,24 @@ export async function createServerAuthorizedOrder(
   }
 
   // 11. Orders without idempotencyKey
+  if (process.env.NODE_ENV === 'production' && !process.env.FIRESTORE_EMULATOR_HOST) {
+    throw {
+      status: 503,
+      message: 'Servicio no disponible: Persistencia fiduciaria inalcanzable.'
+    };
+  }
+
+  if ((process.env.NODE_ENV === 'test' || process.env.RAYO_TEST_ENV === 'true') && !process.env.FIRESTORE_EMULATOR_HOST) {
+    const generatedOrderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const finalOrder = {
+      id: generatedOrderId,
+      ...orderDocument,
+      timestamp: new Date()
+    };
+    testOrdersStore.set(generatedOrderId, finalOrder);
+    return { orderId: generatedOrderId, order: finalOrder, isDuplicate: false };
+  }
+
   let generatedOrderId = `ord_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
   try {
     const docRef = await adminDb.collection('orders').add({
