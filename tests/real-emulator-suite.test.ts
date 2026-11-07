@@ -50,42 +50,34 @@ describe('FASE 12: Suite de Pruebas Reales con Firebase Emulator Suite', () => {
   let emulatorAvailable = false;
 
   before(async () => {
-    // 1. Verificar si el emulador local de Firestore está verdaderamente activo
+    // 1. Intentar inicializar el entorno de pruebas con las reglas reales de firestore.rules
+    const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
+    const rules = fs.readFileSync(rulesPath, 'utf8');
+
     try {
-      const ping = await fetch(`http://${FIRESTORE_HOST}:${FIRESTORE_PORT}/emulator/v1/projects/${PROJECT_ID}:securityRules`, { 
-        signal: AbortSignal.timeout(1000) 
+      testEnv = await initializeTestEnvironment({
+        projectId: PROJECT_ID,
+        firestore: {
+          host: FIRESTORE_HOST,
+          port: FIRESTORE_PORT,
+          rules
+        },
+        auth: {
+          host: FIRESTORE_HOST,
+          port: AUTH_PORT
+        }
       });
-      const contentType = ping.headers.get('content-type') || '';
-      const serverHeader = ping.headers.get('server') || '';
-      if (contentType.includes('application/json') && !serverHeader.includes('nginx')) {
-        emulatorAvailable = true;
-      }
+      emulatorAvailable = true;
     } catch {
       emulatorAvailable = false;
+      testEnv = null;
     }
 
     if (!emulatorAvailable) {
       console.log('\n[Firebase Emulator Suite] Diagnóstico: Los emuladores locales no están corriendo en 127.0.0.1:8080.');
-      console.log('Esta suite está lista y preparada para ser ejecutada en el pipeline CI con OpenJDK 17.\n');
+      console.log('Esta suite está lista y preparada para ser ejecutada en el pipeline CI con OpenJDK 21.\n');
       return;
     }
-
-    // 2. Inicializar el entorno de pruebas con las reglas reales de firestore.rules
-    const rulesPath = path.resolve(process.cwd(), 'firestore.rules');
-    const rules = fs.readFileSync(rulesPath, 'utf8');
-
-    testEnv = await initializeTestEnvironment({
-      projectId: PROJECT_ID,
-      firestore: {
-        host: FIRESTORE_HOST,
-        port: FIRESTORE_PORT,
-        rules
-      },
-      auth: {
-        host: FIRESTORE_HOST,
-        port: AUTH_PORT
-      }
-    });
   });
 
   after(async () => {
@@ -106,7 +98,7 @@ describe('FASE 12: Suite de Pruebas Reales con Firebase Emulator Suite', () => {
         assert.fail('ERROR CRÍTICO EN CI: Firebase Emulator no está disponible en 127.0.0.1:8080.');
       }
       if (t && typeof t.skip === 'function') {
-        t.skip('Firebase Emulator no disponible localmente (ejecución reservada para GitHub Actions CI con OpenJDK 17)');
+        t.skip('Firebase Emulator no disponible localmente (ejecución reservada para GitHub Actions CI con OpenJDK 21)');
       }
       return null;
     }
@@ -484,7 +476,7 @@ describe('FASE 12: Suite de Pruebas Reales con Firebase Emulator Suite', () => {
     it('TC-REAL-STATUS: Informar estado de emuladores para el pipeline de CI/CD', () => {
       if (!emulatorAvailable) {
         console.log('ℹ️ Diagnóstico: Emuladores no activos en contenedor de desarrollo. Esperado para ejecución vía CI/CD en GitHub Actions.');
-        assert.ok(true, 'Suite de pruebas reales preparada correctamente para runner con OpenJDK 17.');
+        assert.ok(true, 'Suite de pruebas reales preparada correctamente para runner con OpenJDK 21.');
       } else {
         assert.ok(testEnv !== null, 'Entorno de pruebas con emuladores inicializado con éxito');
       }
